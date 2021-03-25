@@ -1,0 +1,241 @@
+from requests_html import HTMLSession
+from nltk.tokenize import sent_tokenize, word_tokenize, destructive
+from nltk.corpus import stopwords
+from operator import itemgetter
+from textblob import TextBlob
+from collections import Counter
+import string, re, math
+
+__author__ = "Tsedef Saias"
+
+URL = 'https://en.wikipedia.org/wiki/Radiohead'
+stop_words = (stopwords.words('english'))
+stop_words.extend(("many","may","also","new","within","one","-LSB-","'s","st","th",
+                   "-RSB-","LSB","-BSM-","BSM","RSB","number","ok","best","since", 
+                   "including","year","known","first","()","(",")","[","]","-",
+                   "two","s","s'","EMI","emi","wmg","WMG","without"))
+
+"""
+params:
+    @aURL: A valid web address
+returns: A long string of raw text
+description: Uses an HTML session to retrieve content by specifying which elements to find: in this case ('p'). Then retrieves element's text
+"""
+def get_content(a_URL):
+    session = HTMLSession()
+    r = session.get(a_URL)
+
+    raw_content = r.html.find('p')
+    wiki_text = ""
+    
+    for i in raw_content:
+        wiki_text += ' ' + i.text
+
+    return wiki_text
+""" 
+params:
+    @text: String of raw text
+returns: A dictionary contaning the fitered words and filtered sentences from given raw text
+description: Turns raw text into lists of filtered sentences and  filtered word tokens
+"""
+def tokenize_text(text):
+    # inital tokenization of sentences from raw text
+    sentences = sent_tokenize(text)
+    token_list = []
+    filtered_word_list = []
+    filtered_sentence_list = []
+
+    for sentence in sentences:
+        filtered_sentence = ""
+       # tokenizer function from destructive package removes parantheses and tokenizes given @sentence
+        token_list = destructive.NLTKWordTokenizer.tokenize(destructive.NLTKWordTokenizer, sentence, convert_parentheses=False, return_str=False)
+        for token in token_list:
+            # skip stop words in the stop_word list
+            if token.lower() in stop_words:
+                continue
+            if token.isalpha():
+                 # removed bad tokens from the token list
+                filtered_word_list.append(token.lower())
+            filtered_sentence += " " + str(token)
+        # regex operations to specifically remove digits, special characters, and extra spaces; .strip() for leading/trailing whitespace
+        filtered_sentence = re.sub(r'\d*|[£$%!:`"\']|[.]{3}|', "", filtered_sentence)
+        filtered_sentence = re.sub(r'\s+', " ", filtered_sentence)
+        filtered_sentence = re.sub(r'\s+([?.!"])', r'\1', filtered_sentence)
+        filtered_sentence_list.append(filtered_sentence.strip())
+        # extra visit to sentences to validate no words have gaping spaces between them
+        while ' ' in filtered_sentence:
+            filtered_sentence = filtered_sentence.replace(' ', '')
+
+    return {"tokenized_words" : filtered_word_list, "tokenized_sentences" : filtered_sentence_list}
+
+"""
+params:
+    @word: Word to be matched through list of sentences
+    @sentences: List of sentences
+returns: Number of occurences the word was found
+description: Checks if word is in every sentence of the sentence list using a regex match object
+"""
+
+def find_word_count(word, sentences):
+    word_counter = 0
+    # regex match pattern to create regex object and use its inherited .findall() to calculate # of word occurence
+    match_pattern = re.compile(r'\b({0})\b'.format(word), flags=re.IGNORECASE) 
+    for sentence in sentences:
+        match_object = match_pattern.findall(sentence)
+        if match_object:
+            word_counter = word_counter + len(match_object)
+
+    return word_counter
+
+"""
+params:
+    @word_list : A list of words that have already been filtered for any stop words
+    @sentence_list: A list of sentences that have been filtered for any stop words
+returns: A dictionary of key value pairs where key = significant word and value = calculated significant score (grey value)
+description: Takes in lists of filtered words and senatnces, and calculates the words' significant scores based on term freq. and inverse doc. freq. formulas
+            [FORMULAS FOUND AT BOTTOM OF DOC]
+"""
+def calulate_significant_scores(word_list, sentence_list):
+    total_word_count = len(word_list)
+    total_sentence_count = len(sentence_list)
+
+    # term frequency (TF) dictionary for {word : associated TF score}
+    term_score = {}
+    # assigning term frequency score to each word in the list of words
+    for word in word_list:
+        if word in term_score:
+            term_score[word] += 1
+        else:
+            term_score[word] = 1
+    
+    # calculating the TF for each word
+    for (word, count) in term_score.items():
+        term_score[word] = count/int(total_word_count)
+
+    # inverse document frequency (IDF) dictionary for {word : associated IDF score}
+    inverse_document_score = {}
+    # calculating word count of each word within all sentence to get the IDF score below.
+    for word in word_list:
+        inverse_document_score[word] = find_word_count(word, sentence_list)
+
+     # calculating the IDF for each word in all sentences
+    for word, count in inverse_document_score.items():
+        inverse_document_score[word] = math.log(int(total_sentence_count)/max(count,1))
+
+    # TF*IDF word's significance score. {word : significance_score}
+    significance_score = {}
+    for word in term_score.keys():
+        #significance_score = (term score) * (inverse document score)
+        significance_score[word] =  term_score[word] * inverse_document_score[word]
+
+    return significance_score
+
+"""
+params:
+    @unsorted dict: A dictionary that contains words and their TF * IDF scores (significance_score)
+    @display_limit_num: Number of elements to display
+returns: Dictionary of {words : significance score}
+description: Sorting the words based on thier significance score (TF * IDF)
+"""
+def sort_sig_words(unsorted_dict, display_limit_num):
+    result = dict(sorted(unsorted_dict.items(), key = itemgetter(1), reverse = True)[:display_limit_num]) 
+    return result 
+
+"""
+params:
+    @n: Integer specifying how many words will be included in an n-gram (bi-gram, tri-gram, etc.) 
+    @sentences: List of sentences to be operated on to find n-grams
+returns: Sorted dictionary with stringified version of the n-gram and the overall number of occurences in the list of sentences. eg: {"some words" : 3}
+description: Checks if word is in every sentence of the sentence list using a regex match object
+"""
+def n_grams(n, sentences):
+    n_gram_dict = {}
+
+    for sentence in sentences:
+        # reates TextBlob object which are Python strings with added functionality
+        blob = TextBlob(sentence)
+        # returns a list of WordLists([]). the object contains a list of (n)grams eg: [WordList(['reissues', 'released']), WordList(['released', 'Radiohead'])
+        blob_n_gram = blob.ngrams(n)
+        for list in blob_n_gram:
+            # joining list elements to create a string of words that will act as unique key
+            dict_key = ' '.join(list)
+            for word in list:
+                if word.lower() not in stop_words:
+                    # counter to match current string of words to keys already established in dictionary. creates new entry if none found              
+                    if(dict_key in n_gram_dict.keys()):
+                        n_gram_dict[dict_key] += 1
+                    else:
+                        n_gram_dict[dict_key] = 0
+
+    sorted_n_grams = dict(sorted(n_gram_dict.items(), key=itemgetter(1)))
+    
+    return sorted_n_grams
+
+"""
+params:
+    @n_gram_dict: Initial sorted n_gram dictionary
+    @sub_n_gram_dict: Sorted (n-1)_gram dictionary
+returns: Modified (n-1)_gram dictionary which contains unique keys that don't exist in (n)_gram dictionary
+description: Compares n_gram and (n-1)_gram dictionaries to ensure uniqueness of keys and to avoid "part of phrase" cases where the substrings of (n-1)grams exist in n_grams
+"""
+def compare_n_grams(n_gram_dict, sub_n_gram_dict):
+    common_series_words = []
+
+    for sub_string_key in sub_n_gram_dict.keys():
+        for string_key in n_gram_dict.keys():
+            # if the entire string of words of the (n-1)_gram exists in n_gram, append the string to common_series_words list for subsequent removal from dictionary
+            if sub_string_key in string_key:
+                common_series_words.append(sub_string_key)
+                # break to ensure elements (key) are being removed entirely, regardless of occurences (value)
+                break
+    # removal of non-unique string in (n-1)_gram dictionary
+    for string in common_series_words:
+        sub_n_gram_dict.pop(string)
+
+    modified_sub_n_grams = dict(sorted(sub_n_gram_dict.items(), key=itemgetter(1)))
+
+    return  modified_sub_n_grams
+
+def main():
+   #fetching the html content as text from given URL
+   raw_html_text = get_content(URL)
+   #getting the lists of filtered sentences and filtered word tokens from the raw text
+   tokenized_data = tokenize_text(raw_html_text)
+   words = tokenized_data['tokenized_words']
+   sentences = tokenized_data['tokenized_sentences']
+   #getting the significant important score values for all non-stopword words based on TF and IDF forumlas
+   unsorted_significance = calulate_significant_scores(words, sentences)
+   #declaring number of sorted elements to display
+   display_limit = 50
+   #sorting the words based on thier significance score (TF * IDF)
+   sorted_significance = sort_sig_words(unsorted_significance, display_limit)
+   #listing max sig. words (max: display_limit)
+   top_significant_words = list(sorted_significance.keys());
+   #creating dictionary of n_grams from sig. words and sentences with the input of (3)  
+   tri_grams = (n_grams(3, sentences))
+   #creating seperate dictionary of (n-1)grams that are unique and do not exist as part of phrase in larger iterations of n
+   bi_grams = (compare_n_grams(n_grams(3, sentences), (n_grams(2, sentences))))
+   print("------- Results --------" )
+   print("Sorted list of most significant words from webpage: " + URL)
+   print(top_significant_words)
+   print("\n")
+   print("Associated grey values:")
+   print(sorted_significance)
+   print("\n")
+   print("------- Bonus N-gram challenge ---------")
+   print("Trigrams that do not include n=2:")
+   print(tri_grams)
+   print("\n")
+   print("Bigrams that are unique:")
+   print(bi_grams)
+
+if __name__ == "__main__":
+    main()
+
+
+
+# Term Frequency – How frequently a term occurs in a text. It is measured as the number of times a term t appears in the text / Total number of words in the document
+
+# Inverse Document Frequency – How important a word is in a document. It is measured as log(total number of sentences / Number of sentences with term t)
+
+# TF-IDF – Words’ importance is measure by this score. It is measured as TF * IDF
